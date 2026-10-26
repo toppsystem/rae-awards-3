@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAE Awards 3.0 — Official Voting & Ticketing</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    <script src="https://js.paystack.co/v1/inline.js"></script>
+    <!-- Local Client-Side QR Generator (No external token leak) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center p-4 pb-16">
+
+    <div class="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl mt-4 space-y-6">
+        <header class="text-center border-b border-slate-800 pb-4">
+            <h1 class="text-2xl font-black tracking-wider text-amber-400">RAE AWARDS 3.0</h1>
+            <p class="text-xs text-slate-400 mt-1">Official Verified Voting & Event Ticketing</p>
+        </header>
+
+        <!-- Dynamic Status Banner -->
+        <div id="status-box" class="hidden p-3.5 rounded-xl text-xs font-medium leading-relaxed"></div>
+
+        <!-- 1. VOTING SECTION -->
+        <section class="space-y-4">
+            <div class="flex justify-between items-center">
+                <h2 class="text-sm font-bold uppercase tracking-wider text-amber-400">1. Official Ballot</h2>
+                <button id="logout-btn" onclick="logout()" class="hidden text-xs text-red-400 hover:underline">Sign Out</button>
+            </div>
+
+            <div id="auth-section" class="bg-slate-950 border border-slate-800 p-4 rounded-xl space-y-3 text-center">
+                <p class="text-xs text-slate-300">Strict one-vote-per-category policy. Sign in with Google to unlock your ballot.</p>
+                <button onclick="loginWithGoogle()" class="w-full bg-white hover:bg-slate-200 text-slate-900 font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-3 transition-all shadow">
+                    <svg class="w-5 h-5" viewBox="0 0 24 24"><path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
+                    Continue with Google
+                </button>
+            </div>
+
+            <div id="ballot-section" class="hidden space-y-4">
+                <div class="text-xs text-slate-400 bg-slate-800/60 p-2.5 rounded-lg border border-slate-700 flex justify-between">
+                    <span>Verified Voter:</span>
+                    <span id="user-email" class="text-slate-200 font-semibold truncate ml-2"></span>
+                </div>
+
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Select Award Category</label>
+                    <select id="category-select" onchange="renderNominees()" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white focus:border-amber-400 outline-none">
+                        <option value="">Loading categories...</option>
+                    </select>
+                </div>
+
+                <div id="nominees-list" class="space-y-2.5"></div>
+
+                <!-- Cloudflare Turnstile Widget -->
+                <div class="flex justify-center pt-2">
+                    <div id="turnstile-widget" class="cf-turnstile" data-sitekey="YOUR_TURNSTILE_SITE_KEY"></div>
+                </div>
+
+                <button id="vote-btn" onclick="submitVote()" class="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-3 px-4 rounded-xl transition-all shadow-lg">
+                    Lock In Verified Vote
+                </button>
+            </div>
+        </section>
+
+        <hr class="border-slate-800">
+
+        <!-- 2. TICKETING SECTION -->
+        <section class="space-y-4">
+            <h2 class="text-sm font-bold uppercase tracking-wider text-amber-400">2. Official Event Passes</h2>
+
+            <div class="space-y-3 bg-slate-950 p-4 rounded-xl border border-slate-800">
+                <input id="buyer-name" type="text" maxlength="80" placeholder="Full Name (Required on Pass)" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white outline-none focus:border-amber-400">
+                <input id="buyer-email" type="email" placeholder="Email Address" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white outline-none focus:border-amber-400">
+                <input id="buyer-phone" type="tel" maxlength="20" placeholder="Phone Number" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white outline-none focus:border-amber-400">
+
+                <div id="tiers-container" class="grid grid-cols-1 gap-2.5 pt-2">
+                    <!-- Loaded dynamically from ticket_tiers table -->
+                </div>
+            </div>
+
+            <!-- Issued QR Ticket Pass Display -->
+            <div id="ticket-pass" class="hidden bg-emerald-950/40 border border-emerald-500/50 p-5 rounded-xl text-center space-y-3">
+                <div class="text-xs font-bold uppercase tracking-widest text-emerald-400">Official Verified Entry Pass</div>
+                <div id="pass-holder" class="text-base font-bold text-white"></div>
+                <div id="pass-tier" class="text-xs text-amber-300 font-semibold uppercase"></div>
+                <div class="bg-white p-3.5 rounded-xl inline-block my-2 shadow-inner">
+                    <div id="pass-qr" class="mx-auto"></div>
+                </div>
+                <div id="pass-token" class="text-[11px] font-mono text-emerald-300 break-all bg-slate-950/80 p-2 rounded border border-emerald-500/30"></div>
+                <p class="text-[11px] text-slate-400">Screenshot this pass immediately. Your QR token will be scanned at the gate.</p>
+            </div>
+
+            <!-- Ticket Recovery Box (In case of network drop or page reload) -->
+            <details class="bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs">
+                <summary class="cursor-pointer text-slate-400 font-medium">Already paid? Recover your Ticket Pass</summary>
+                <div class="mt-3 space-y-2">
+                    <input id="recover-ref" type="text" placeholder="Paystack Reference (e.g. RAE3-...)" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white outline-none">
+                    <input id="recover-email" type="email" placeholder="Buyer Email Address" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white outline-none">
+                    <button onclick="recoverTicket()" class="w-full bg-slate-800 hover:bg-slate-700 text-amber-400 font-semibold py-2 rounded-lg border border-slate-700">
+                        Retrieve Pass
+                    </button>
+                </div>
+            </details>
+        </section>
+    </div>
+
+    <script>
+        // =========================================================
+        // REPLACE THESE 3 KEYS BELOW + TURNSTILE KEY IN HTML ABOVE
+        // =========================================================
+        const SUPABASE_URL = 'YOUR_SUPABASE_PROJECT_URL';
+        const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+        const PAYSTACK_PUBLIC_KEY = 'YOUR_PAYSTACK_TEST_PUBLIC_KEY';
+
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        let currentSession = null;
+        let categoriesData = [];
+        let nomineesData = [];
+        let myVotes = {};
+        let selectedNomineeId = null;
+
+        // Default fallback matching exact SQL schema in case RLS restricts anonymous reads
+        let ticketTiers = [
+            { id: 'classic', name: 'The Gallery', price_kobo: 300000 },
+            { id: 'elite', name: 'The Red Carpet', price_kobo: 3000000 },
+            { id: 'royal', name: 'The Crown Table', price_kobo: 12000000 }
+        ];
+
+        function escapeHtml(str) {
+            return String(str || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function showStatus(msg, isError = false) {
+            const box = document.getElementById('status-box');
+            box.className = `p-3.5 rounded-xl text-xs font-medium ${isError ? 'bg-red-950/70 border border-red-500/50 text-red-200' : 'bg-emerald-950/70 border border-emerald-500/50 text-emerald-200'}`;
+            box.innerText = msg;
+            box.classList.remove('hidden');
+        }
+
+        async function initPage() {
+            await loadTicketTiers();
+
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (session) {
+                currentSession = session;
+                await initAuthenticatedApp(session.user);
+            }
+
+            // Auto-fill recovery fields if a previous purchase happened on this device
+            const lastRef = localStorage.getItem('rae3_last_ref');
+            const lastEmail = localStorage.getItem('rae3_last_email');
+            if (lastRef && lastEmail) {
+                document.getElementById('recover-ref').value = lastRef;
+                document.getElementById('recover-email').value = lastEmail;
+            }
+        }
+
+        async function loadTicketTiers() {
+            const { data, error } = await supabaseClient.from('ticket_tiers').select('*').order('price_kobo');
+            if (!error && Array.isArray(data) && data.length > 0) {
+                ticketTiers = data;
+            }
+            const container = document.getElementById('tiers-container');
+            container.innerHTML = ticketTiers.map(t => {
+                const naira = (Number(t.price_kobo) / 100).toLocaleString('en-NG');
+                const isRoyal = t.id === 'royal';
+                return `
+                <button onclick="buyTicket('${escapeHtml(t.id)}', ${Number(t.price_kobo)})" class="bg-slate-900 hover:bg-slate-800 border ${isRoyal ? 'border-amber-500/50' : 'border-slate-700'} p-3.5 rounded-xl text-left flex justify-between items-center transition">
+                    <div>
+                        <div class="font-bold text-sm ${isRoyal ? 'text-amber-300' : 'text-white'}">${escapeHtml(t.name)} (${escapeHtml(t.id.toUpperCase())})</div>
+                        <div class="text-xs text-slate-400">Official Verified Entry Pass</div>
+                    </div>
+                    <span class="text-amber-400 font-bold text-sm">₦${naira}</span>
+                </button>`;
+            }).join('');
+        }
+
+        async function loginWithGoogle() {
+            const { error } = await supabaseClient.auth.signInWithOAuth({
+                provider: 'google',
+                options: { redirectTo: window.location.origin }
+            });
+            if (error) showStatus(error.message, true);
+        }
+
+        async function logout() {
+            await supabaseClient.auth.signOut();
+            window.location.reload();
+        }
+
+        async function initAuthenticatedApp(user) {
+            document.getElementById('auth-section').classList.add('hidden');
+            document.getElementById('ballot-section').classList.remove('hidden');
+            document.getElementById('logout-btn').classList.remove('hidden');
+            document.getElementById('user-email').innerText = user.email;
+            if (!document.getElementById('buyer-email').value) {
+                document.getElementById('buyer-email').value = user.email;
+            }
+            await loadBallotData(user.id);
+        }
+
+        async function loadBallotData(userId) {
+            const [catRes, nomRes, voteRes] = await Promise.all([
+                supabaseClient.from('categories').select('*').order('id'),
+                supabaseClient.from('nominees').select('id, category_id, name, biz, photo_url, active').eq('active', true),
+                supabaseClient.from('votes').select('category_id, nominee_id').eq('user_id', userId)
+            ]);
+
+            if (catRes.error || nomRes.error) {
+                showStatus('Unable to load ballot categories from database.', true);
+                return;
+            }
+
+            categoriesData = catRes.data || [];
+            nomineesData = nomRes.data || [];
+            myVotes = {};
+            (voteRes.data || []).forEach(v => { myVotes[v.category_id] = v.nominee_id; });
+
+            const select = document.getElementById('category-select');
+            if (categoriesData.length === 0) {
+                select.innerHTML = `<option value="">No categories published yet</option>`;
+                return;
+            }
+
+            select.innerHTML = categoriesData.map(c => {
+                const votedTag = myVotes[c.id] ? ' ✓ (Vote Locked)' : '';
+                return `<option value="${Number(c.id)}">${escapeHtml(c.name || ('Category #' + c.id))}${votedTag}</option>`;
+            }).join('');
+
+            renderNominees();
+        }
+
+        function renderNominees() {
+            const catId = Number(document.getElementById('category-select').value);
+            const container = document.getElementById('nominees-list');
+            const voteBtn = document.getElementById('vote-btn');
+            selectedNomineeId = null;
+
+            const filtered = nomineesData.filter(n => Number(n.category_id) === catId);
+            const existingVote = myVotes[catId];
+
+            if (filtered.length === 0) {
+                container.innerHTML = `<p class="text-xs text-slate-500 italic p-2">No active nominees in this category.</p>`;
+                voteBtn.disabled = true;
+                voteBtn.classList.add('opacity-50');
+                return;
+            }
+
+            if (existingVote) {
+                voteBtn.disabled = true;
+                voteBtn.innerText = 'Vote Locked for This Category';
+                voteBtn.classList.add('opacity-50');
+            } else {
+                voteBtn.disabled = false;
+                voteBtn.innerText = 'Lock In Verified Vote';
+                voteBtn.classList.remove('opacity-50');
+            }
+
+            container.innerHTML = filtered.map(n => {
+                const isVoted = existingVote === n.id;
+                const safeId = escapeHtml(n.id);
+                const photoHtml = n.photo_url
+                    ? `<img src="${escapeHtml(n.photo_url)}" alt="" class="w-10 h-10 rounded-full object-cover border border-slate-700 mr-3 shrink-0">`
+                    : '';
+                return `
+                <label onclick="selectNominee('${safeId}')" class="flex items-center justify-between p-3 rounded-xl border ${isVoted ? 'border-emerald-500 bg-emerald-950/30' : 'border-slate-800 bg-slate-950 hover:border-slate-700'} cursor-pointer transition">
+                    <div class="flex items-center min-w-0 pr-2">
+                        ${photoHtml}
+                        <div class="truncate">
+                            <div class="text-sm font-bold text-white truncate">${escapeHtml(n.name)}</div>
+                            ${n.biz ? `<div class="text-xs text-slate-400 truncate">${escapeHtml(n.biz)}</div>` : ''}
+                        </div>
+                    </div>
+                    <input type="radio" name="nominee" value="${safeId}" ${isVoted ? 'checked disabled' : ''} ${existingVote ? 'disabled' : ''} class="accent-amber-400 w-4 h-4 shrink-0">
+                </label>`;
+            }).join('');
+        }
+
+        function selectNominee(id) {
+            const catId = Number(document.getElementById('category-select').value);
+            if (!myVotes[catId]) {
+                selectedNomineeId = id;
+            }
+        }
+
+        async function submitVote() {
+            const catId = Number(document.getElementById('category-select').value);
+            if (myVotes[catId]) {
+                showStatus('You have already voted in this category.', true);
+                return;
+            }
+            if (!selectedNomineeId) {
+                showStatus('Please select a nominee before submitting.', true);
+                return;
+            }
+
+            const token = document.querySelector('[name="cf-turnstile-response"]')?.value;
+            if (!token) {
+                showStatus('Please complete the Cloudflare bot verification check.', true);
+                return;
+            }
+
+            const btn = document.getElementById('vote-btn');
+            btn.disabled = true;
+            btn.innerText = 'Verifying & Locking Vote...';
+
+            try {
+                const res = await fetch('/api/vote', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentSession.access_token}`
+                    },
+                    body: JSON.stringify({
+                        category_id: catId,
+                        nominee_id: selectedNomineeId,
+                        turnstile_token: token
+                    })
+                });
+
+                const data = await res.json();
+                if (window.turnstile) window.turnstile.reset();
+
+                if (!res.ok) {
+                    showStatus(data.error || 'Vote verification failed.', true);
+                    btn.disabled = false;
+                    btn.innerText = 'Lock In Verified Vote';
+                    return;
+                }
+
+                showStatus('Vote verified and permanently locked in database!');
+                await loadBallotData(currentSession.user.id);
+            } catch (err) {
+                showStatus('Network error while submitting vote. Please try again.', true);
+                btn.disabled = false;
+                btn.innerText = 'Lock In Verified Vote';
+            }
+        }
+
+        function renderPassOnScreen(ticket, tierName) {
+            document.getElementById('pass-holder').innerText = ticket.buyer_name;
+            document.getElementById('pass-tier').innerText = `${tierName || ticket.tier_id.toUpperCase()} • Ref: ${ticket.reference}`;
+            document.getElementById('pass-token').innerText = `QR Token: ${ticket.qr_token}`;
+
+            const qrContainer = document.getElementById('pass-qr');
+            qrContainer.innerHTML = '';
+            new QRCode(qrContainer, {
+                text: ticket.qr_token,
+                width: 160,
+                height: 160,
+                colorDark: '#020617',
+                colorLight: '#ffffff',
+                correctLevel: QRCode.CorrectLevel.H
+            });
+
+            document.getElementById('ticket-pass').classList.remove('hidden');
+        }
+
+        function buyTicket(tierId, amountKobo) {
+            const name = document.getElementById('buyer-name').value.trim();
+            const email = document.getElementById('buyer-email').value.trim().toLowerCase();
+            const phone = document.getElementById('buyer-phone').value.trim();
+
+            if (!name || !email || !phone) {
+                showStatus('Please fill in your Full Name, Email, and Phone Number before purchasing a pass.', true);
+                return;
+            }
+
+            const ref = `RAE3-${tierId.toUpperCase()}-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+            localStorage.setItem('rae3_last_ref', ref);
+      
