@@ -1,1 +1,370 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAE Awards 3.0 — Official Voting & Ticketing</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    <script src="https://js.paystack.co/v1/inline.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center p-4 pb-16">
+
+    <div class="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl mt-6 space-y-6">
+        <header class="text-center border-b border-slate-800 pb-4">
+            <h1 class="text-3xl font-black tracking-wider text-amber-400">RAE AWARDS 3.0</h1>
+            <p class="text-xs text-slate-400 mt-1">Verified One-Person-One-Vote & Cryptographic Ticketing</p>
+            <div id="vote-window-badge" class="mt-2 inline-block px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">
+                Checking voting window...
+            </div>
+        </header>
+
+        <!-- Notification Banner -->
+        <div id="status-box" class="hidden p-3 rounded-xl text-xs font-medium border"></div>
+
+        <!-- SECTION 1: Authentication & Voting -->
+        <section class="space-y-4">
+            <div class="flex justify-between items-center">
+                <h2 class="text-sm font-bold uppercase tracking-wider text-amber-400">1. Official Ballot</h2>
+                <div id="user-bar" class="hidden flex items-center gap-2">
+                    <span id="user-email" class="text-xs text-slate-400 truncate max-w-[160px]"></span>
+                    <button onclick="logout()" class="text-xs text-red-400 hover:underline font-semibold">Sign Out</button>
+                </div>
+            </div>
+
+            <!-- Login Prompt -->
+            <div id="auth-section" class="bg-slate-950/60 border border-slate-800 rounded-xl p-5 text-center space-y-3">
+                <p class="text-xs text-slate-300">To prevent bot rigging, you must sign in with a verified Google account to access the ballot.</p>
+                <button onclick="loginWithGoogle()" class="w-full bg-white hover:bg-slate-200 text-slate-900 font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-3 transition-all shadow-lg">
+                    <svg class="w-5 h-5" viewBox="0 0 24 24"><path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
+                    Continue with Google
+                </button>
+            </div>
+
+            <!-- Authenticated Ballot Area -->
+            <div id="ballot-section" class="hidden space-y-4">
+                <!-- Cloudflare Turnstile Widget -->
+                <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-col items-center">
+                    <p class="text-[11px] text-slate-400 mb-2">Step 1: Complete anti-bot verification before casting a vote</p>
+                    <div id="turnstile-container" class="cf-turnstile" data-sitekey="YOUR_TURNSTILE_SITE_KEY"></div>
+                </div>
+
+                <!-- Dynamic Categories & Nominees -->
+                <div id="categories-container" class="space-y-4">
+                    <p class="text-xs text-slate-400 text-center py-4">Loading live categories & nominees...</p>
+                </div>
+            </div>
+        </section>
+
+        <hr class="border-slate-800">
+
+        <!-- SECTION 2: Event Ticketing (Open to all buyers) -->
+        <section class="space-y-4">
+            <h2 class="text-sm font-bold uppercase tracking-wider text-amber-400">2. Event Table & Ticket Passes</h2>
+            
+            <div class="space-y-2">
+                <input id="buyer-name" type="text" placeholder="Full Name (for Pass)" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-white focus:border-amber-400 outline-none">
+                <input id="buyer-email" type="email" placeholder="Email Address" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-white focus:border-amber-400 outline-none">
+                <input id="buyer-phone" type="tel" placeholder="Phone Number (e.g. 080...)" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-white focus:border-amber-400 outline-none">
+            </div>
+
+            <!-- Dynamic Ticket Tiers from Database -->
+            <div id="tiers-container" class="grid grid-cols-1 gap-3">
+                <p class="text-xs text-slate-400">Loading ticket tiers...</p>
+            </div>
+
+            <!-- Verified QR Pass Modal/Card -->
+            <div id="ticket-pass-card" class="hidden bg-slate-950 border-2 border-amber-400 rounded-2xl p-5 text-center space-y-3">
+                <div class="text-xs font-bold uppercase tracking-widest text-emerald-400">✓ Cryptographically Verified Pass</div>
+                <h3 id="pass-tier-name" class="text-lg font-black text-white"></h3>
+                <p id="pass-buyer-name" class="text-sm text-slate-300"></p>
+                <div id="qrcode" class="bg-white p-3 rounded-xl inline-block mx-auto"></div>
+                <p id="pass-token-text" class="text-[11px] font-mono text-slate-400 break-all"></p>
+                <p class="text-xs text-amber-300">Screenshot this QR code cleanly. It will be scanned at the gate.</p>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. CONFIGURATION (REPLACE WITH YOUR KEYS)
+        // ==========================================
+        const CONFIG = {
+            SUPABASE_URL: 'https://sxeufjbzwlkxoocctokr.supabase.co',
+            SUPABASE_ANON_KEY: 'YOUR_SUPABASE_ANON_KEY',
+            PAYSTACK_PUBLIC_KEY: 'YOUR_PAYSTACK_TEST_PUBLIC_KEY'
+        };
+
+        // Note: Using `sb` instead of `supabase` so we don't shadow the global window.supabase object!
+        const sb = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+        let currentSession = null;
+        let ticketTiersMap = {};
+
+        function showStatus(msg, isError = false) {
+            const box = document.getElementById('status-box');
+            box.className = `p-3 rounded-xl text-xs font-medium border ${
+                isError ? 'bg-red-950/60 border-red-700 text-red-200' : 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
+            }`;
+            box.innerText = msg;
+            box.classList.remove('hidden');
+        }
+
+        // ==========================================
+        // 2. INITIALIZATION ON PAGE LOAD
+        // ==========================================
+        window.addEventListener('DOMContentLoaded', async () => {
+            await checkVotingWindow();
+            await loadTicketTiers();
+
+            const { data: { session } } = await sb.auth.getSession();
+            if (session) {
+                currentSession = session;
+                onUserLoggedIn(session.user);
+            }
+
+            sb.auth.onAuthStateChange((_event, session) => {
+                currentSession = session;
+                if (session) onUserLoggedIn(session.user);
+            });
+        });
+
+        async function checkVotingWindow() {
+            const badge = document.getElementById('vote-window-badge');
+            const { data, error } = await sb.from('settings').select('*').single();
+            if (error || !data) {
+                badge.innerText = 'Voting Status Ready';
+                return;
+            }
+            const now = new Date();
+            const open = new Date(data.vote_open);
+            const close = new Date(data.vote_close);
+
+            if (now < open) {
+                badge.innerText = `Voting Opens: ${open.toLocaleDateString()}`;
+                badge.className = 'mt-2 inline-block px-3 py-1 rounded-full text-xs font-semibold bg-amber-950 text-amber-300 border border-amber-800';
+            } else if (now > close) {
+                badge.innerText = 'Voting Closed';
+                badge.className = 'mt-2 inline-block px-3 py-1 rounded-full text-xs font-semibold bg-red-950 text-red-300 border border-red-800';
+            } else {
+                badge.innerText = `● Voting Live (Closes ${close.toLocaleDateString()})`;
+                badge.className = 'mt-2 inline-block px-3 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800';
+            }
+        }
+
+        // ==========================================
+        // 3. GOOGLE OAUTH LOGIC
+        // ==========================================
+        async function loginWithGoogle() {
+            const { error } = await sb.auth.signInWithOAuth({
+                provider: 'google',
+                options: { redirectTo: window.location.origin }
+            });
+            if (error) showStatus('Login error: ' + error.message, true);
+        }
+
+        async function logout() {
+            await sb.auth.signOut();
+            window.location.reload();
+        }
+
+        function onUserLoggedIn(user) {
+            document.getElementById('auth-section').classList.add('hidden');
+            document.getElementById('ballot-section').classList.remove('hidden');
+            document.getElementById('user-bar').classList.remove('hidden');
+            document.getElementById('user-email').innerText = user.email;
+            
+            const emailInput = document.getElementById('buyer-email');
+            if (!emailInput.value) emailInput.value = user.email;
+
+            loadBallotAndVotes(user.id);
+        }
+
+        // ==========================================
+        // 4. BALLOT & SERVER-VERIFIED VOTING
+        // ==========================================
+        async function loadBallotAndVotes(userId) {
+            const container = document.getElementById('categories-container');
+            
+            const [catRes, nomRes, voteRes] = await Promise.all([
+                sb.from('categories').select('*').order('id'),
+                sb.from('nominees').select('*').eq('active', true),
+                sb.from('votes').select('category_id, nominee_id').eq('user_id', userId)
+            ]);
+
+            if (catRes.error || nomRes.error) {
+                container.innerHTML = `<p class="text-xs text-red-400">Error loading ballot: ${(catRes.error || nomRes.error).message}</p>`;
+                return;
+            }
+
+            const categories = catRes.data || [];
+            const nominees = nomRes.data || [];
+            const userVotes = {};
+            (voteRes.data || []).forEach(v => { userVotes[v.category_id] = v.nominee_id; });
+
+            if (categories.length === 0) {
+                container.innerHTML = `<p class="text-xs text-slate-400 text-center">No categories added to the database yet.</p>`;
+                return;
+            }
+
+            container.innerHTML = categories.map(cat => {
+                const catNominees = nominees.filter(n => n.category_id === cat.id);
+                const votedNomineeId = userVotes[cat.id];
+
+                return `
+                    <div class="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+                        <div class="flex justify-between items-center">
+                            <h3 class="font-bold text-sm text-white">${cat.name || 'Category #' + cat.id}</h3>
+                            ${votedNomineeId ? `<span class="text-[11px] bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.5 rounded-full font-semibold">✓ Vote Locked</span>` : ''}
+                        </div>
+                        <div class="space-y-2">
+                            ${catNominees.map(nom => {
+                                const isVoted = votedNomineeId === nom.id;
+                                return `
+                                    <div class="flex items-center justify-between p-2.5 rounded-lg border ${isVoted ? 'bg-amber-950/30 border-amber-500' : 'bg-slate-900 border-slate-800'}">
+                                        <div>
+                                            <div class="text-xs font-bold text-slate-100">${nom.name}</div>
+                                            ${nom.bio ? `<div class="text-[11px] text-slate-400">${nom.bio}</div>` : ''}
+                                        </div>
+                                        ${votedNomineeId ? (
+                                            isVoted ? `<span class="text-xs font-bold text-amber-400">Selected</span>` : `<span class="text-xs text-slate-600">Locked</span>`
+                                        ) : `
+                                            <button onclick="castVote(${cat.id}, '${nom.id}')" class="bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold px-3 py-1.5 rounded-lg transition-all">
+                                                Vote
+                                            </button>
+                                        `}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function castVote(categoryId, nomineeId) {
+            const turnstileToken = document.querySelector('[name="cf-turnstile-response"]')?.value;
+            if (!turnstileToken) {
+                showStatus('Please complete the Cloudflare Turnstile anti-bot check first.', true);
+                return;
+            }
+
+            showStatus('Verifying Turnstile token and locking your vote on the server...');
+
+            try {
+                // Calls our Cloudflare Pages Function (/api/vote) for strict server-side verification
+                const response = await fetch('/api/vote', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentSession.access_token}`
+                    },
+                    body: JSON.stringify({
+                        category_id: categoryId,
+                        nominee_id: nomineeId,
+                        turnstile_token: turnstileToken
+                    })
+                });
+
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || 'Vote failed');
+
+                showStatus('Vote verified and permanently recorded!');
+                if (window.turnstile) window.turnstile.reset();
+                await loadBallotAndVotes(currentSession.user.id);
+            } catch (err) {
+                showStatus(err.message, true);
+                if (window.turnstile) window.turnstile.reset();
+            }
+        }
+
+        // ==========================================
+        // 5. PAYSTACK TICKETING & WEBHOOK POLLING
+        // ==========================================
+        async function loadTicketTiers() {
+            const container = document.getElementById('tiers-container');
+            const { data, error } = await sb.from('ticket_tiers').select('*').order('price_kobo');
+            if (error || !data) {
+                container.innerHTML = `<p class="text-xs text-red-400">Unable to load ticket tiers.</p>`;
+                return;
+            }
+
+            data.forEach(t => { ticketTiersMap[t.id] = t; });
+
+            container.innerHTML = data.map(tier => {
+                const naira = (tier.price_kobo / 100).toLocaleString();
+                return `
+                    <button onclick="buyTicket('${tier.id}')" class="bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-amber-500/50 p-4 rounded-xl text-left flex justify-between items-center transition-all">
+                        <div>
+                            <div class="font-bold text-sm text-white">${tier.name} <span class="text-xs uppercase text-amber-400 ml-1">(${tier.id})</span></div>
+                            <div class="text-xs text-slate-400">Official Verified Entry Pass</div>
+                        </div>
+                        <span class="text-amber-400 font-black text-base">₦${naira}</span>
+                    </button>
+                `;
+            }).join('');
+        }
+
+        function buyTicket(tierId) {
+            const tier = ticketTiersMap[tierId];
+            const buyerName = document.getElementById('buyer-name').value.trim();
+            const buyerEmail = document.getElementById('buyer-email').value.trim();
+            const buyerPhone = document.getElementById('buyer-phone').value.trim();
+
+            if (!buyerName || !buyerEmail || !buyerPhone) {
+                showStatus('Please enter your Full Name, Email, and Phone Number before selecting a ticket tier.', true);
+                return;
+            }
+
+            const reference = 'RAE3_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+
+            const handler = PaystackPop.setup({
+                key: CONFIG.PAYSTACK_PUBLIC_KEY,
+                email: buyerEmail,
+                amount: tier.price_kobo, // Exact kobo amount from database (300000, 3000000, 12000000)
+                currency: 'NGN',
+                ref: reference,
+                metadata: {
+                    tier_id: tier.id,
+                    buyer_name: buyerName,
+                    phone: buyerPhone
+                },
+                callback: function(response) {
+                    showStatus('Payment received! Waiting for server cryptographic verification...');
+                    verifyAndFetchTicketPass(response.reference);
+                },
+                onClose: function() {
+                    showStatus('Payment window closed.', true);
+                }
+            });
+            handler.openIframe();
+        }
+
+        async function verifyAndFetchTicketPass(reference) {
+            // Calls our backend endpoint to verify directly with Paystack API / Webhook DB record
+            for (let attempt = 1; attempt <= 6; attempt++) {
+                try {
+                    const res = await fetch(`/api/paystack-webhook?reference=${encodeURIComponent(reference)}`);
+                    if (res.ok) {
+                        const ticket = await res.json();
+                        renderTicketPass(ticket);
+                        showStatus('Ticket verified and issued!');
+                        return;
+                    }
+                } catch (e) {}
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            showStatus('Payment recorded! If your QR pass did not appear yet, save your reference: ' + reference, true);
+        }
+
+        function renderTicketPass(ticket) {
+            const card = document.getElementById('ticket-pass-card');
+            card.classList.remove('hidden');
+            document.getElementById('pass-tier-name').innerText = ticketTiersMap[ticket.tier_id]?.name || ticket.tier_id.toUpperCase();
+            document.getElementById('pass-buyer-name').innerText = `${ticket.buyer_name} (${ticket.phone})`;
+            document.getElementById('pass-token-text').innerText = `Pass Token: ${ticket.qr_token}`;
+            
+            const qrContainer = document.getElementById('qrcode');
+    
