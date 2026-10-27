@@ -1,6 +1,10 @@
-
 // POST /api/paystack-webhook  (set this URL in Paystack Dashboard > Settings > API Keys & Webhooks)
 // Safety net: issues the ticket even if the buyer closed the page right after paying.
+// Paystack may add its fee on top of the ticket price. Accept price .. price + fee allowance.
+const amountOk = (paid, price) => {
+  paid = Number(paid); price = Number(price);
+  return Number.isFinite(paid) && paid >= price && paid <= price + Math.max(Math.round(price * 0.05), 50000);
+};
 const svc = (env) => {
   const h = { apikey: env.SUPABASE_SERVICE_ROLE_KEY };
   if (String(env.SUPABASE_SERVICE_ROLE_KEY).startsWith('eyJ')) h.Authorization = `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`;
@@ -36,7 +40,7 @@ export async function onRequestPost({ request, env }) {
     const S = svc(env), base = env.SUPABASE_URL + '/rest/v1';
     const tr = await fetch(`${base}/ticket_tiers?id=eq.${encodeURIComponent(tier_id)}&select=price_kobo`, { headers: S });
     const tiers = await tr.json();
-    if (!Array.isArray(tiers) || !tiers[0] || Number(tx.amount) !== Number(tiers[0].price_kobo)) {
+    if (!Array.isArray(tiers) || !tiers[0] || !amountOk(tx.amount, tiers[0].price_kobo)) {
       console.error('webhook price mismatch', tx.reference);
       return new Response('Price mismatch', { status: 200 }); // do not retry; needs a human
     }
