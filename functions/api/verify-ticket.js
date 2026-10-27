@@ -1,7 +1,11 @@
-
 // POST /api/verify-ticket { reference, email }  -> verifies with Paystack, issues (or returns) the pass
 const J = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+// Paystack may add its fee on top of the ticket price. Accept price .. price + fee allowance.
+const amountOk = (paid, price) => {
+  paid = Number(paid); price = Number(price);
+  return Number.isFinite(paid) && paid >= price && paid <= price + Math.max(Math.round(price * 0.05), 50000);
+};
 const svc = (env) => {
   const h = { apikey: env.SUPABASE_SERVICE_ROLE_KEY };
   if (String(env.SUPABASE_SERVICE_ROLE_KEY).startsWith('eyJ')) h.Authorization = `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`;
@@ -50,8 +54,8 @@ export async function onRequestPost({ request, env }) {
     const tiers = await tr.json();
     if (!Array.isArray(tiers) || !tiers[0]) return J({ error: 'Unknown ticket type. Contact the organisers with your reference.' }, 400);
     const tier = tiers[0];
-    if (Number(tx.amount) !== Number(tier.price_kobo)) {
-      return J({ error: 'Amount paid does not match the price. Contact the organisers with your reference.' }, 400);
+    if (!amountOk(tx.amount, tier.price_kobo)) {
+      return J({ error: 'Amount paid does not match the ticket price. Contact the organisers with your reference.' }, 400);
     }
 
     // Idempotent: the webhook or an earlier call may already have inserted it.
@@ -70,5 +74,4 @@ export async function onRequestPost({ request, env }) {
     console.error('verify error', e && e.message);
     return J({ error: 'Server error. Please try again.', retry: true }, 500);
   }
-  }
-               
+}
