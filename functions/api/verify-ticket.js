@@ -69,6 +69,20 @@ export async function onRequestPost({ request, env }) {
     const gr = await fetch(`${base}/tickets?reference=eq.${encodeURIComponent(reference)}&select=reference,tier_id,buyer_name,qr_token,checked_in_at`, { headers: S });
     const rows = await gr.json();
     if (!Array.isArray(rows) || !rows[0]) return J({ error: 'Could not load your pass. Try again.', retry: true }, 500);
+    // If the buyer is signed in, link this ticket to their account (best effort).
+    const auth = request.headers.get('Authorization') || '';
+    if (/^Bearer\s+\S+$/.test(auth) && env.SUPABASE_ANON_KEY) {
+      try {
+        const ur = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { Authorization: auth, apikey: env.SUPABASE_ANON_KEY } });
+        const u = ur.ok ? await ur.json() : null;
+        if (u && u.id && String(u.email || '').toLowerCase() === email) {
+          await fetch(`${base}/tickets?reference=eq.${encodeURIComponent(reference)}&user_id=is.null`, {
+            method: 'PATCH', headers: { ...S, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ user_id: u.id })
+          });
+        }
+      } catch (e) { /* ignore */ }
+    }
     return J({ success: true, ticket: rows[0], tier_name: tier.name, kind: tier.kind });
   } catch (e) {
     console.error('verify error', e && e.message);
