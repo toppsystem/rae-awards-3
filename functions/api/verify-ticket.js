@@ -21,12 +21,36 @@ const issue = async (base, S, f) => {
   const first = r.status + ' ' + r.text;
   r = await insTicket(base, S, { reference: f.reference, tier_id: f.tier_id, buyer_name: f.buyer_name, email: f.email, verified: true });
   if (!r.ok) r.text = (first + ' | ' + r.status + ' ' + r.text).slice(0, 300);
+  else r.degraded = first.slice(0, 300);
   return r;
 };
 const svc = (env) => {
   const h = { apikey: env.SUPABASE_SERVICE_ROLE_KEY };
   if (String(env.SUPABASE_SERVICE_ROLE_KEY).startsWith('eyJ')) h.Authorization = `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`;
   return h;
+};
+
+// Records a payment that needs a human and emails you once per reference.
+// Needs Cloudflare env vars RESEND_API_KEY, ALERT_EMAIL, ALERT_FROM. Never throws.
+const alertFail = async (env, S, base, info) => {
+  try {
+    const amt = Number(info.amount);
+    const row = { reference: String(info.reference || 'unknown').slice(0, 100), email: info.email || null, tier_id: info.tier_id || null, amount_kobo: Number.isFinite(amt) ? amt : null, reason: String(info.reason || '').slice(0, 500) };
+    const r = await fetch(`${base}/failed_payments?on_conflict=reference`, {
+      method: 'POST',
+      headers: { ...S, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=representation' },
+      body: JSON.stringify(row)
+    });
+    const created = r.ok ? await r.json().catch(() => []) : [];
+    if (r.ok && !(Array.isArray(created) && created.length)) return; // already reported, do not email again
+    if (env.RESEND_API_KEY && env.ALERT_EMAIL) {
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: env.ALERT_FROM || 'alerts@resend.dev', to: [env.ALERT_EMAIL], subject: 'Payment needs attention: ' + row.reference, text: `Reason: ${row.reason}\nReference: ${row.reference}\nEmail: ${row.email}\nTier: ${row.tier_id}\nAmount (kobo): ${row.amount_kobo}` })
+      });
+    }
+  } catch (e) { console.error('alert failed', e && e.message); }
 };
 
 export async function onRequestPost({ request, env }) {
@@ -36,7 +60,6 @@ export async function onRequestPost({ request, env }) {
     }
     let body;
     try { body = await request.json(); } catch { return J({ error: 'Invalid request.' }, 400); }
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return J({ error: 'Invalid request.' }, 400);
     const reference = String(body.reference || '').trim();
     const email = String(body.email || '').trim().toLowerCase();
     if (!/^[A-Za-z0-9._-]{6,100}$/.test(reference) || !/^.+@.+\..+$/.test(email)) {
@@ -48,7 +71,7 @@ export async function onRequestPost({ request, env }) {
     });
     const pj = await pr.json().catch(() => ({}));
     if (!pj.status || !pj.data) {
-      return J({ error: pr.status === 401 ? 'Payment key is not accepted by Paystack.' : 'Payment not found yet. If you were charged, wait a minute and try again.', code: pr.status === 401 ? 'PS_KEY_INVALID' : 'PS_NOT_FOUND', detail: String(pj.message || '').slice(0, 120), retry: pr.status !== 401 }, pr.status === 401 ? 500 : 404);
+      return J({ error: pr.status === 401 ? 'Payment key is not accepted by Paystack.' : 'Payment not found yet. If you were charged, wait a minute and try again.', code: pr.status === 401 ? 'PS_KEY_INVALID' : 'PS_NOT_FOUND', retry: pr.status !== 401 }, pr.status === 401 ? 500 : 404);
     }
     const tx = pj.data;
     if (tx.status !== 'success') {
@@ -68,17 +91,25 @@ export async function onRequestPost({ request, env }) {
     if (!tier_id || !buyer_name) return J({ error: 'Payment details incomplete. Contact the organisers with your reference.' }, 400);
 
     const S = svc(env), base = env.SUPABASE_URL + '/rest/v1';
-    const tr = await fetch(`${base}/ticket_tiers?id=eq.${encodeURIComponent(tier_id)}&select=id,name,kind,price_kobo`, { headers: S });
+    const tr = await fetch(`${base}/ticket_tiers?id=eq.${encodeURIComponent(tier_id)}&select=*`, { headers: S });
     const tiers = await tr.json();
     if (!Array.isArray(tiers) || !tiers[0]) return J({ error: 'Unknown ticket type. Contact the organisers with your reference.' }, 400);
     const tier = tiers[0];
     if (!amountOk(tx.amount, tier.price_kobo)) {
+      await alertFail(env, S, base, { reference, email, tier_id, amount: tx.amount, reason: 'Price mismatch at verify' });
       return J({ error: 'Amount paid does not match the ticket price. Contact the organisers with your reference.' }, 400);
     }
 
     // Idempotent: the webhook or an earlier call may already have inserted it.
-    const ins = await issue(base, S, { reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true });
-    if (!ins.ok) { console.error('ticket insert', ins.text); return J({ error: 'Payment received, but the pass could not be saved. The organisers have been alerted by your reference.', code: 'DB_INSERT', detail: ins.text, retry: false }, 500); }
+    const row = { reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true };
+    if (tier.event_id) row.event_id = tier.event_id;   // only once the SQL migration has been run
+    const ins = await issue(base, S, row);
+    if (!ins.ok) {
+      console.error('ticket insert', ins.text);
+      await alertFail(env, S, base, { reference, email, tier_id, amount: tx.amount, reason: 'Ticket insert failed at verify: ' + ins.text });
+      return J({ error: 'Payment received, but the pass could not be saved. The organisers have been alerted by your reference.', code: 'DB_INSERT', retry: false }, 500);
+    }
+    if (ins.degraded) await alertFail(env, S, base, { reference, email, tier_id, amount: tx.amount, reason: 'Ticket issued with reduced fields: ' + ins.degraded });
 
     const gr = await fetch(`${base}/tickets?reference=eq.${encodeURIComponent(reference)}&select=reference,tier_id,buyer_name,qr_token,checked_in_at`, { headers: S });
     const rows = await gr.json();
@@ -104,23 +135,3 @@ export async function onRequestPost({ request, env }) {
   }
 }
 
-// GET /api/verify-ticket  -> setup check (no secrets shown). Open it in your browser; delete this function once all is green.
-export async function onRequestGet({ env }) {
-  const out = { env: {}, paystack: null, tickets_table: null, tiers: null };
-  for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'PAYSTACK_SECRET_KEY']) out.env[k] = !!env[k];
-  try {
-    if (env.PAYSTACK_SECRET_KEY) {
-      const r = await fetch('https://api.paystack.co/transaction/verify/healthcheck' + Date.now(), { headers: { Authorization: `Bearer ${env.PAYSTACK_SECRET_KEY}` } });
-      const k = String(env.PAYSTACK_SECRET_KEY);
-      out.paystack = { key_mode: k.startsWith('sk_live') ? 'live' : k.startsWith('sk_test') ? 'test' : 'unknown', key_accepted: r.status !== 401, http: r.status };
-    }
-    if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
-      const S = svc(env), base = env.SUPABASE_URL + '/rest/v1';
-      const t = await fetch(`${base}/tickets?select=reference,tier_id,buyer_name,phone,email,amount_kobo,verified,user_id,qr_token,revoked,checked_in_at,created_at&limit=1`, { headers: S });
-      out.tickets_table = t.ok ? 'ok' : { http: t.status, problem: (await t.text()).slice(0, 300) };
-      const g = await fetch(`${base}/ticket_tiers?select=id,price_kobo`, { headers: S });
-      out.tiers = g.ok ? (await g.json()).map((x) => x.id + ':' + x.price_kobo) : { http: g.status };
-    }
-  } catch (e) { out.error = String(e && e.message); }
-  return new Response(JSON.stringify(out, null, 2), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-}
