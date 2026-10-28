@@ -20,12 +20,36 @@ const issue = async (base, S, f) => {
   const first = r.status + ' ' + r.text;
   r = await insTicket(base, S, { reference: f.reference, tier_id: f.tier_id, buyer_name: f.buyer_name, email: f.email, verified: true });
   if (!r.ok) r.text = (first + ' | ' + r.status + ' ' + r.text).slice(0, 300);
+  else r.degraded = first.slice(0, 300);
   return r;
 };
 const svc = (env) => {
   const h = { apikey: env.SUPABASE_SERVICE_ROLE_KEY };
   if (String(env.SUPABASE_SERVICE_ROLE_KEY).startsWith('eyJ')) h.Authorization = `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`;
   return h;
+};
+
+// Records a payment that needs a human and emails you once per reference.
+// Needs Cloudflare env vars RESEND_API_KEY, ALERT_EMAIL, ALERT_FROM. Never throws.
+const alertFail = async (env, S, base, info) => {
+  try {
+    const amt = Number(info.amount);
+    const row = { reference: String(info.reference || 'unknown').slice(0, 100), email: info.email || null, tier_id: info.tier_id || null, amount_kobo: Number.isFinite(amt) ? amt : null, reason: String(info.reason || '').slice(0, 500) };
+    const r = await fetch(`${base}/failed_payments?on_conflict=reference`, {
+      method: 'POST',
+      headers: { ...S, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=representation' },
+      body: JSON.stringify(row)
+    });
+    const created = r.ok ? await r.json().catch(() => []) : [];
+    if (r.ok && !(Array.isArray(created) && created.length)) return; // already reported, do not email again
+    if (env.RESEND_API_KEY && env.ALERT_EMAIL) {
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: env.ALERT_FROM || 'alerts@resend.dev', to: [env.ALERT_EMAIL], subject: 'Payment needs attention: ' + row.reference, text: `Reason: ${row.reason}\nReference: ${row.reference}\nEmail: ${row.email}\nTier: ${row.tier_id}\nAmount (kobo): ${row.amount_kobo}` })
+      });
+    }
+  } catch (e) { console.error('alert failed', e && e.message); }
 };
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 function safeEq(a, b) {
@@ -52,17 +76,27 @@ export async function onRequestPost({ request, env }) {
     const buyer_name = String(meta.buyer_name || '').trim().slice(0, 120);
     const phone = String(meta.phone || '').trim().slice(0, 30);
     const email = String(tx.customer && tx.customer.email || '').trim().toLowerCase();
-    if (!tx.reference || !tier_id || !buyer_name || !email || tx.currency !== 'NGN') return new Response('Incomplete metadata', { status: 200 });
-
     const S = svc(env), base = env.SUPABASE_URL + '/rest/v1';
-    const tr = await fetch(`${base}/ticket_tiers?id=eq.${encodeURIComponent(tier_id)}&select=price_kobo`, { headers: S });
+    if (!tx.reference || !tier_id || !buyer_name || !email || tx.currency !== 'NGN') {
+      if (tx.reference) await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Paid but metadata incomplete or currency not NGN' });
+      return new Response('Incomplete metadata', { status: 200 });
+    }
+    const tr = await fetch(`${base}/ticket_tiers?id=eq.${encodeURIComponent(tier_id)}&select=*`, { headers: S });
     const tiers = await tr.json();
     if (!Array.isArray(tiers) || !tiers[0] || !amountOk(tx.amount, tiers[0].price_kobo)) {
       console.error('webhook price mismatch', tx.reference);
-      return new Response('Price mismatch', { status: 200 }); // do not retry; needs a human
+      await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Price mismatch or unknown ticket type' });
+      return new Response('Price mismatch', { status: 200 }); // do not retry; you are emailed instead
     }
-    const ins = await issue(base, S, { reference: tx.reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true });
-    if (!ins.ok) { console.error('webhook insert', ins.text); return new Response('Retry', { status: 500 }); }
+    const row = { reference: tx.reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true };
+    if (tiers[0].event_id) row.event_id = tiers[0].event_id;   // only once the SQL migration has been run
+    const ins = await issue(base, S, row);
+    if (!ins.ok) {
+      console.error('webhook insert', ins.text);
+      await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Ticket insert failed: ' + ins.text });
+      return new Response('Retry', { status: 500 });
+    }
+    if (ins.degraded) await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Ticket issued with reduced fields. Database rejected the full row: ' + ins.degraded });
     return new Response('OK', { status: 200 });
   } catch (e) {
     console.error('webhook error', e && e.message);
