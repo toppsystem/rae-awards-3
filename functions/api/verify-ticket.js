@@ -6,6 +6,23 @@ const amountOk = (paid, price) => {
   paid = Number(paid); price = Number(price);
   return Number.isFinite(paid) && paid >= price && paid <= price + Math.max(Math.round(price * 0.05), 50000);
 };
+const insTicket = async (base, S, row) => {
+  const r = await fetch(`${base}/tickets?on_conflict=reference`, {
+    method: 'POST',
+    headers: { ...S, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
+    body: JSON.stringify(row)
+  });
+  return { ok: r.ok, status: r.status, text: r.ok ? '' : await r.text().catch(() => '') };
+};
+// Tries the full row first; if the database rejects it (e.g. a column is missing), retries with the essentials.
+const issue = async (base, S, f) => {
+  let r = await insTicket(base, S, f);
+  if (r.ok) return r;
+  const first = r.status + ' ' + r.text;
+  r = await insTicket(base, S, { reference: f.reference, tier_id: f.tier_id, buyer_name: f.buyer_name, email: f.email, verified: true });
+  if (!r.ok) r.text = (first + ' | ' + r.status + ' ' + r.text).slice(0, 300);
+  return r;
+};
 const svc = (env) => {
   const h = { apikey: env.SUPABASE_SERVICE_ROLE_KEY };
   if (String(env.SUPABASE_SERVICE_ROLE_KEY).startsWith('eyJ')) h.Authorization = `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`;
@@ -15,7 +32,7 @@ const svc = (env) => {
 export async function onRequestPost({ request, env }) {
   try {
     for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'PAYSTACK_SECRET_KEY']) {
-      if (!env[k]) return J({ error: `Server not configured (missing ${k}).` }, 500);
+      if (!env[k]) return J({ error: `Server not configured (missing ${k}).`, code: 'CONFIG_' + k, retry: false }, 500);
     }
     let body;
     try { body = await request.json(); } catch { return J({ error: 'Invalid request.' }, 400); }
@@ -30,7 +47,7 @@ export async function onRequestPost({ request, env }) {
     });
     const pj = await pr.json().catch(() => ({}));
     if (!pj.status || !pj.data) {
-      return J({ error: 'Payment not found yet. If you were charged, wait a minute and try again.', retry: true }, 404);
+      return J({ error: pr.status === 401 ? 'Payment key is not accepted by Paystack.' : 'Payment not found yet. If you were charged, wait a minute and try again.', code: pr.status === 401 ? 'PS_KEY_INVALID' : 'PS_NOT_FOUND', detail: String(pj.message || '').slice(0, 120), retry: pr.status !== 401 }, pr.status === 401 ? 500 : 404);
     }
     const tx = pj.data;
     if (tx.status !== 'success') {
@@ -59,16 +76,12 @@ export async function onRequestPost({ request, env }) {
     }
 
     // Idempotent: the webhook or an earlier call may already have inserted it.
-    const ins = await fetch(`${base}/tickets?on_conflict=reference`, {
-      method: 'POST',
-      headers: { ...S, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
-      body: JSON.stringify({ reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true })
-    });
-    if (!ins.ok) { console.error('ticket insert', ins.status, await ins.text()); return J({ error: 'Could not issue your pass. Try again in a minute.', retry: true }, 500); }
+    const ins = await issue(base, S, { reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true });
+    if (!ins.ok) { console.error('ticket insert', ins.text); return J({ error: 'Payment received, but the pass could not be saved. The organisers have been alerted by your reference.', code: 'DB_INSERT', detail: ins.text, retry: false }, 500); }
 
     const gr = await fetch(`${base}/tickets?reference=eq.${encodeURIComponent(reference)}&select=reference,tier_id,buyer_name,qr_token,checked_in_at`, { headers: S });
     const rows = await gr.json();
-    if (!Array.isArray(rows) || !rows[0]) return J({ error: 'Could not load your pass. Try again.', retry: true }, 500);
+    if (!Array.isArray(rows) || !rows[0]) return J({ error: 'Could not load your pass. Try again.', code: 'DB_READ', retry: true }, 500);
     // If the buyer is signed in, link this ticket to their account (best effort).
     const auth = request.headers.get('Authorization') || '';
     if (/^Bearer\s+\S+$/.test(auth) && env.SUPABASE_ANON_KEY) {
@@ -86,6 +99,27 @@ export async function onRequestPost({ request, env }) {
     return J({ success: true, ticket: rows[0], tier_name: tier.name, kind: tier.kind });
   } catch (e) {
     console.error('verify error', e && e.message);
-    return J({ error: 'Server error. Please try again.', retry: true }, 500);
+    return J({ error: 'Server error. Please try again.', code: 'EXCEPTION', retry: true }, 500);
   }
 }
+
+// GET /api/verify-ticket  -> setup check (no secrets shown). Open it in your browser; delete this function once all is green.
+export async function onRequestGet({ env }) {
+  const out = { env: {}, paystack: null, tickets_table: null, tiers: null };
+  for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'PAYSTACK_SECRET_KEY']) out.env[k] = !!env[k];
+  try {
+    if (env.PAYSTACK_SECRET_KEY) {
+      const r = await fetch('https://api.paystack.co/transaction/verify/healthcheck' + Date.now(), { headers: { Authorization: `Bearer ${env.PAYSTACK_SECRET_KEY}` } });
+      const k = String(env.PAYSTACK_SECRET_KEY);
+      out.paystack = { key_mode: k.startsWith('sk_live') ? 'live' : k.startsWith('sk_test') ? 'test' : 'unknown', key_accepted: r.status !== 401, http: r.status };
+    }
+    if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
+      const S = svc(env), base = env.SUPABASE_URL + '/rest/v1';
+      const t = await fetch(`${base}/tickets?select=reference,tier_id,buyer_name,phone,email,amount_kobo,verified,user_id,qr_token,revoked,checked_in_at,created_at&limit=1`, { headers: S });
+      out.tickets_table = t.ok ? 'ok' : { http: t.status, problem: (await t.text()).slice(0, 300) };
+      const g = await fetch(`${base}/ticket_tiers?select=id,price_kobo`, { headers: S });
+      out.tiers = g.ok ? (await g.json()).map((x) => x.id + ':' + x.price_kobo) : { http: g.status };
+    }
+  } catch (e) { out.error = String(e && e.message); }
+  return new Response(JSON.stringify(out, null, 2), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      }
