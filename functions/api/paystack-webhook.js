@@ -5,51 +5,23 @@ const amountOk = (paid, price) => {
   paid = Number(paid); price = Number(price);
   return Number.isFinite(paid) && paid >= price && paid <= price + Math.max(Math.round(price * 0.05), 50000);
 };
-const insTicket = async (base, S, row) => {
-  const r = await fetch(`${base}/tickets?on_conflict=reference`, {
-    method: 'POST',
-    headers: { ...S, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
-    body: JSON.stringify(row)
-  });
-  return { ok: r.ok, status: r.status, text: r.ok ? '' : await r.text().catch(() => '') };
-};
-// Tries the full row first; if the database rejects it (e.g. a column is missing), retries with the essentials.
-const issue = async (base, S, f) => {
-  let r = await insTicket(base, S, f);
-  if (r.ok) return r;
-  const first = r.status + ' ' + r.text;
-  r = await insTicket(base, S, { reference: f.reference, tier_id: f.tier_id, buyer_name: f.buyer_name, email: f.email, verified: true });
-  if (!r.ok) r.text = (first + ' | ' + r.status + ' ' + r.text).slice(0, 300);
-  else r.degraded = first.slice(0, 300);
-  return r;
+// Emails you once per payment reference when a paid ticket cannot be issued (needs RESEND_API_KEY, ALERT_EMAIL, ALERT_FROM).
+const alertOnce = async (env, ref, subject, lines) => {
+  if (!env.RESEND_API_KEY || !env.ALERT_EMAIL || !env.ALERT_FROM) return;
+  try {
+    if (typeof caches !== 'undefined') {
+      const k = new Request('https://alerts.rae.local/' + encodeURIComponent(ref)), c = caches.default;
+      if (await c.match(k)) return;
+      await c.put(k, new Response('1', { headers: { 'Cache-Control': 'max-age=86400' } }));
+    }
+    await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: env.ALERT_FROM, to: [env.ALERT_EMAIL], subject, text: lines.concat(['', 'Reference: ' + ref, 'Check Paystack and Supabase, then issue or refund by hand.']).join('\n') }) });
+  } catch (e) { /* alerts must never break payments */ }
 };
 const svc = (env) => {
   const h = { apikey: env.SUPABASE_SERVICE_ROLE_KEY };
   if (String(env.SUPABASE_SERVICE_ROLE_KEY).startsWith('eyJ')) h.Authorization = `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`;
   return h;
-};
-
-// Records a payment that needs a human and emails you once per reference.
-// Needs Cloudflare env vars RESEND_API_KEY, ALERT_EMAIL, ALERT_FROM. Never throws.
-const alertFail = async (env, S, base, info) => {
-  try {
-    const amt = Number(info.amount);
-    const row = { reference: String(info.reference || 'unknown').slice(0, 100), email: info.email || null, tier_id: info.tier_id || null, amount_kobo: Number.isFinite(amt) ? amt : null, reason: String(info.reason || '').slice(0, 500) };
-    const r = await fetch(`${base}/failed_payments?on_conflict=reference`, {
-      method: 'POST',
-      headers: { ...S, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=representation' },
-      body: JSON.stringify(row)
-    });
-    const created = r.ok ? await r.json().catch(() => []) : [];
-    if (r.ok && !(Array.isArray(created) && created.length)) return; // already reported, do not email again
-    if (env.RESEND_API_KEY && env.ALERT_EMAIL) {
-      await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from: env.ALERT_FROM || 'alerts@resend.dev', to: [env.ALERT_EMAIL], subject: 'Payment needs attention: ' + row.reference, text: `Reason: ${row.reason}\nReference: ${row.reference}\nEmail: ${row.email}\nTier: ${row.tier_id}\nAmount (kobo): ${row.amount_kobo}` })
-      });
-    }
-  } catch (e) { console.error('alert failed', e && e.message); }
 };
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 function safeEq(a, b) {
@@ -71,32 +43,26 @@ export async function onRequestPost({ request, env }) {
     const ev = JSON.parse(raw);
     if (ev.event !== 'charge.success') return new Response('Ignored', { status: 200 });
     const tx = ev.data || {};
-    const meta = tx.metadata || {};
+    let meta = tx.metadata || {}; if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
     const tier_id = String(meta.tier_id || '').trim();
     const buyer_name = String(meta.buyer_name || '').trim().slice(0, 120);
     const phone = String(meta.phone || '').trim().slice(0, 30);
     const email = String(tx.customer && tx.customer.email || '').trim().toLowerCase();
+    if (!tx.reference || !tier_id || !buyer_name || !email || tx.currency !== 'NGN') { await alertOnce(env, tx.reference || 'unknown-' + Date.now(), 'RAE: paid ticket has incomplete details', ['Email: ' + email, 'Amount: ' + tx.amount]); return new Response('Incomplete metadata', { status: 200 }); }
+
     const S = svc(env), base = env.SUPABASE_URL + '/rest/v1';
-    if (!tx.reference || !tier_id || !buyer_name || !email || tx.currency !== 'NGN') {
-      if (tx.reference) await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Paid but metadata incomplete or currency not NGN' });
-      return new Response('Incomplete metadata', { status: 200 });
-    }
-    const tr = await fetch(`${base}/ticket_tiers?id=eq.${encodeURIComponent(tier_id)}&select=*`, { headers: S });
+    const tr = await fetch(`${base}/ticket_tiers?id=eq.${encodeURIComponent(tier_id)}&select=price_kobo`, { headers: S });
     const tiers = await tr.json();
     if (!Array.isArray(tiers) || !tiers[0] || !amountOk(tx.amount, tiers[0].price_kobo)) {
-      console.error('webhook price mismatch', tx.reference);
-      await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Price mismatch or unknown ticket type' });
-      return new Response('Price mismatch', { status: 200 }); // do not retry; you are emailed instead
+      console.error('webhook price mismatch', tx.reference); await alertOnce(env, tx.reference, 'RAE: paid amount does not match the price', ['Paid (kobo): ' + tx.amount, 'Email: ' + email]);
+      return new Response('Price mismatch', { status: 200 }); // do not retry; needs a human
     }
-    const row = { reference: tx.reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true };
-    if (tiers[0].event_id) row.event_id = tiers[0].event_id;   // only once the SQL migration has been run
-    const ins = await issue(base, S, row);
-    if (!ins.ok) {
-      console.error('webhook insert', ins.text);
-      await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Ticket insert failed: ' + ins.text });
-      return new Response('Retry', { status: 500 });
-    }
-    if (ins.degraded) await alertFail(env, S, base, { reference: tx.reference, email, tier_id, amount: tx.amount, reason: 'Ticket issued with reduced fields. Database rejected the full row: ' + ins.degraded });
+    const ins = await fetch(`${base}/tickets?on_conflict=reference`, {
+      method: 'POST',
+      headers: { ...S, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
+      body: JSON.stringify({ reference: tx.reference, tier_id, buyer_name, phone, email, amount_kobo: Number(tx.amount), verified: true })
+    });
+    if (!ins.ok) { console.error('webhook insert', ins.status, await ins.text()); await alertOnce(env, tx.reference, 'RAE: paid ticket could not be saved', ['Database status: ' + ins.status, 'Email: ' + email]); return new Response('Retry', { status: 500 }); }
     return new Response('OK', { status: 200 });
   } catch (e) {
     console.error('webhook error', e && e.message);
