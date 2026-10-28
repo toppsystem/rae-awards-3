@@ -36,6 +36,7 @@ export async function onRequestPost({ request, env }) {
     }
     let body;
     try { body = await request.json(); } catch { return J({ error: 'Invalid request.' }, 400); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return J({ error: 'Invalid request.' }, 400);
     const reference = String(body.reference || '').trim();
     const email = String(body.email || '').trim().toLowerCase();
     if (!/^[A-Za-z0-9._-]{6,100}$/.test(reference) || !/^.+@.+\..+$/.test(email)) {
@@ -122,4 +123,4 @@ export async function onRequestGet({ env }) {
     }
   } catch (e) { out.error = String(e && e.message); }
   return new Response(JSON.stringify(out, null, 2), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-      }
+}
