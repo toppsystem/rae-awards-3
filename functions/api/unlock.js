@@ -1,9 +1,12 @@
+// POST /api/unlock { turnstile_token }  + Authorization: Bearer <user jwt>
+// One bot check per voter (valid 7 days). After this, votes go straight to the database.
+const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+export async function onRequestPost({ request, env }) {
   try {
     for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'TURNSTILE_SECRET_KEY']) {
       if (!env[k]) return J({ error: `Server not configured (missing ${k}).` }, 500);
     }
     let body; try { body = await request.json(); } catch { return J({ error: 'Invalid request.' }, 400); }
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return J({ error: 'Invalid request.' }, 400);
     const token = String(body.turnstile_token || '').trim(), auth = request.headers.get('Authorization') || '';
     if (!token || !/^Bearer\s+\S+$/.test(auth)) return J({ error: 'Missing sign-in or security check.' }, 400);
     const ur = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { Authorization: auth, apikey: env.SUPABASE_ANON_KEY } });
