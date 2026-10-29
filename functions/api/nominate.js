@@ -38,3 +38,31 @@ export async function onRequestPost({ request, env }) {
     return J({ ok: true });
   } catch (e) { return J({ error: 'Something went wrong. Please try again.' }, 500); }
 }
+// GET  /api/nominate  -> my submitted cards   |   POST /api/nominate { category_id, name, biz, photo } -> sends a card as "pending"
+// Authorization: Bearer <supabase user jwt>. Needs SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY.
+const J = (o, s) => new Response(JSON.stringify(o), { status: s || 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+const svc = (env) => { const h = { apikey: env.SUPABASE_SERVICE_ROLE_KEY }; if (String(env.SUPABASE_SERVICE_ROLE_KEY).startsWith('eyJ')) h.Authorization = 'Bearer ' + env.SUPABASE_SERVICE_ROLE_KEY; return h; };
+async function who(request, env) {
+  const a = request.headers.get('Authorization') || '';
+  if (!/^Bearer\s+\S+$/.test(a)) return null;
+  const r = await fetch(env.SUPABASE_URL + '/auth/v1/user', { headers: { Authorization: a, apikey: env.SUPABASE_ANON_KEY } });
+  return r.ok ? r.json() : null;
+}
+const FIELDS = 'id,category_id,name,biz,status,active,photo_url,submitted_at';
+export async function onRequestGet({ request, env }) {
+  try {
+    const u = await who(request, env); if (!u) return J({ error: 'Please sign in again.' }, 401);
+    const q = (f) => fetch(`${env.SUPABASE_URL}/rest/v1/nominees?submitted_by=eq.${u.id}&select=${f}&order=submitted_at.desc&limit=20`, { headers: svc(env) });
+    let r = await q(FIELDS + ',reject_reason'); if (!r.ok) r = await q(FIELDS);
+    return J({ items: r.ok ? await r.json() : [] });
+  } catch (e) { return J({ items: [] }); }
+}
+export async function onRequestPost({ request, env }) {
+  try {
+    const u = await who(request, env); if (!u) return J({ error: 'Please sign in again.' }, 401);
+    let b; try { b = await request.json(); } catch (e) { return J({ error: 'Invalid request.' }, 400); }
+    const category_id = Number(b.category_id), name = String(b.name || '').trim(), biz = String(b.biz || '').trim();
+    const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(b.photo || ''));
+    if (!Number.isInteger(category_id) || category_id < 1 || name.length < 2 || name.length > 120 || biz.length > 120) return J({ error: 'Check your name and category.' }, 400);
+    if (!m || m[2].length > 280000) return J({ error: 'Photo is too large or the wrong format.' }, 400);
+    const base = env.SUPABASE_URL + '/rest/v1', H = svc(env), JH = { ...H, 'Content-Type': 'application/json' };
